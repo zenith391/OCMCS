@@ -89,4 +89,61 @@ function packets.newPlayerAbilitiesPacket(abilities)
 	}
 end
 
+function packets.newKeepAlivePacket(id)
+	id = id or math.floor(math.random() * math.pow(1, 60))
+	local ss = net.stringStream()
+	net.writeLong(ss, id)
+	return {
+		id = 0x21,
+		data = ss.str
+	}
+end
+
+function packets.newEntityTeleportPacket(entity)
+	local ss = net.stringStream()
+	
+	net.writeVarInt(ss, entity.id)
+	net.writeDouble(ss, entity.x)
+	net.writeDouble(ss, entity.y)
+	net.writeDouble(ss, entity.z)
+	net.writeAngle(ss, 0)
+	net.writeAngle(ss, 0)
+	net.writeBoolean(ss, entity.onGround)
+
+	return {
+		id = 0x57,
+		data = ss.str
+	}
+end
+
+function packets.newSpawnPlayerPacket(player)
+	local ss = net.stringStream()
+	local entity = player.world.entities[player.entityId]
+	
+	net.writeVarInt(ss, player.entityId)
+	net.writeUUID(ss, player.uuid)
+	net.writeDouble(ss, entity.x)
+	net.writeDouble(ss, entity.y)
+	net.writeDouble(ss, entity.z)
+	net.writeAngle(ss, 0)
+	net.writeAngle(ss, 0)
+
+	return {
+		id = 0x05,
+		data = ss.str
+	}
+end
+
+function packets.newBlockChangePacket(location, id)
+	local ss = net.stringStream()
+	
+	net.writePosition(ss, location)
+	net.writeVarInt(ss, id)
+
+	return {
+		id = 0x0C,
+		data = ss.str
+	}
+end
+
 return packets

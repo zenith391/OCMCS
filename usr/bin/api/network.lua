@@ -39,6 +39,10 @@ function net.readDouble(stream)
 	return string.unpack(">d", stream:read(8))
 end
 
+function net.readUnsignedLong(stream)
+	return string.unpack(">I8", stream:read(8))
+end
+
 function net.writeUnsignedByte(stream, num)
 	stream:write(string.char(num))
 end
@@ -80,6 +84,10 @@ function net.writeNBTString(stream, str)
 	stream:write(str)
 end
 
+function net.writeAngle(stream, angle)
+	stream:write(string.char(angle))
+end
+
 function net.writeUUID(stream, uuid)
 	local p1 = tonumber(uuid:sub(1,8), 16)
 	local p2 = tonumber(uuid:sub(10,13) .. uuid:sub(15,18), 16)
@@ -92,7 +100,7 @@ function net.writeUUID(stream, uuid)
 end
 
 function net.writePosition(stream, pos)
-	local num = ((pos[1] & 0x3FFFFFF) << 38) | ((pos[2] & 0x3FFFFFF) << 12) | (pos[3] & 0xFFF)
+	local num = ((pos[1] & 0x3FFFFFF) << 38) | ((pos[3] & 0x3FFFFFF) << 12) | (pos[2] & 0xFFF)
 	net.writeLong(stream, num)
 end
 
@@ -127,8 +135,45 @@ function net.writeVarInt(stream, value)
 	until value == 0
 end
 
-local function readPosition(stream)
-	local value = readUnsignedLong(stream)
+function net.readNBT(stream)
+	local tag = net.readUnsignedByte(stream)
+	if tag == 0 then -- TAG_End
+		return nil
+	end
+	local nameLen = net.readUnsignedShort(stream)
+	local name = stream:read(nameLen)
+	if tag == 10 then -- TAG_Compound
+		local compound = {}
+		while true do
+			local val, valName = net.readNBT(stream)
+			if not val then
+				break
+			else
+				compound[valName] = val
+			end
+		end
+		return compound, name
+	end
+end
+
+function net.readSlot(stream)
+	local present = net.readBoolean(stream)
+	local itemID, count, nbt
+	if present then
+		itemID = net.readVarInt(stream)
+		count = net.readUnsignedByte(stream)
+		nbt = net.readNBT(stream)
+	end
+	return {
+		present = present,
+		id = itemID,
+		count = count,
+		nbt = nbt
+	}
+end
+
+function net.readPosition(stream)
+	local value = net.readUnsignedLong(stream)
 	local x = value >> 38;
 	local y = value & 0xFFF;
 	local z = (value << 26 >> 38)
@@ -161,9 +206,11 @@ function net.readPacket(stream)
 end
 
 function net.writePacket(stream, packet)
-	net.writeVarInt(stream, #packet.data + 1) -- length
-	net.writeVarInt(stream, packet.id)
-	stream:write(packet.data)
+	local ss = net.stringStream()
+	net.writeVarInt(ss, #packet.data + 1) -- length
+	net.writeVarInt(ss, packet.id)
+	ss:write(packet.data)
+	stream:write(ss.str)
 end
 
 return net

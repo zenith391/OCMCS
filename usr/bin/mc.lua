@@ -16,11 +16,11 @@ end
 local pluginEvent = api_require("event")
 local packets = api_require("packets")
 local net = api_require("network")
+local nextEid = 0
 
 local function generateEId()
-	local max = math.pow(2, 31)
-	local min = -max
-	return math.floor(math.random(min, max))
+	nextEid = nextEid + 1
+	return nextEid
 end
 
 local function writeChunkLight(stream, cx, cz, world)
@@ -122,6 +122,12 @@ local function writeChunkData(stream, cx, cz, world)
 		for z=0, 15 do
 			for x=0, 15 do
 				local block = world.generator.block(cx*16+x, y, cz*16+z)
+				for k, v in pairs(world.changedBlocks) do
+					if v.x == cx*16+x and v.y == y and v.z == cz*16+z then
+						block = v.newId
+					end
+				end
+
 				local index = (((y*16)+z)*16)+x
 				local value = (usePalette and palette[block]) or block
 				
@@ -220,6 +226,7 @@ local world = {
 			end
 		end
 	},
+	changedBlocks = {},
 	players = players,
 	entities = {}
 }
@@ -228,6 +235,63 @@ function world:broadcast(component)
 	local chatPacket = packets.newChatMessagePacket(component, "chat")
 	for k, player in pairs(self.players) do
 		net.writePacket(player.socket, chatPacket)
+	end
+end
+
+function world:moveEntity(entity, x, y, z)
+	entity.x = x
+	entity.y = y
+	entity.z = z
+	pluginEvent.send("entity_move", entity, x, y, z)
+	local movePacket = packets.newEntityTeleportPacket(entity)
+	for k, player in pairs(self.players) do
+		if player.entityId ~= entity.id then
+			net.writePacket(player.socket, movePacket)
+		end
+	end
+end
+
+function world:addPlayer(player)
+	local ss = net.stringStream()
+	net.writeVarInt(ss, 0) -- add player
+	net.writeVarInt(ss, 1)
+
+	net.writeUUID(ss, player.uuid)
+	net.writeString(ss, player.name)
+	net.writeVarInt(ss, 0) -- 0 properties
+	net.writeVarInt(ss, player.gamemode)
+	net.writeVarInt(ss, -1) -- unknown ping
+	net.writeBoolean(ss, false) -- no display name
+
+	local addPacket = {
+		id = 0x34, -- player info
+		data = ss.str
+	}
+	local spawnPacket = packets.newSpawnPlayerPacket(player)
+
+	for k, player in pairs(self.players) do
+		net.writePacket(player.socket, addPacket)
+		net.writePacket(player.socket, spawnPacket)
+	end
+	self.players[player.uuid] = player
+end
+
+function world:setBlock(location, id)
+	for k, v in pairs(self.changedBlocks) do
+		if v.x == location[1] and v.y == location[2] and v.z == location[3] then
+			self.changedBlocks[k].newId = id
+		end
+	end
+	table.insert(self.changedBlocks, {
+		x = location[1],
+		y = location[2],
+		z = location[3],
+		newId = id
+	})
+
+	local changePacket = packets.newBlockChangePacket(location, id)
+	for k, player in pairs(self.players) do
+		net.writePacket(player.socket, changePacket)
 	end
 end
 
@@ -241,20 +305,35 @@ end
 
 local packetHandlers = {
 	[0x00] = function(stream, socket, client)
-		if client.state == 0 then
+		if client.state == "handshake" then
 			local ver = net.readVarInt(stream)
 			local address = net.readString(stream)
 			local port = net.readUnsignedShort(stream)
 			local nextState = net.readVarInt(stream)
-			client.state = nextState
-		elseif client.state == 1 then
+			if nextState == 1 then
+				client.state = "status"
+			elseif nextState == 2 then
+				client.state = "login"
+			else
+				print("invalid next state: " .. nextState)
+			end
+		elseif client.state == "status" then
 			local ss = net.stringStream()
+			local sample = {}
+			for k, v in pairs(world.players) do
+				table.insert(sample, {
+					name = v.name,
+					id = v.uuid
+				})
+			end
+			serverStatus.players.online = #sample
+			serverStatus.players.sample = sample
 			net.writeString(ss, json.encode(serverStatus))
 			net.writePacket(socket, {
 				id = 0x00, -- response
 				data = ss.str
 			})
-		elseif client.state == 2 then
+		elseif client.state == "login" then
 			local name = net.readString(stream)
 			print(name .. " is logging in..")
 			local ss = net.stringStream()
@@ -271,20 +350,26 @@ local packetHandlers = {
 			local eid = generateEId()
 			local gamemode = 1
 			local dimension = 0
-			players[id] = setmetatable({
+			
+			world.entities[eid] = {
+				x = world.spawnPosition[1],
+				y = world.spawnPosition[2],
+				z = world.spawnPosition[3],
+				id = eid,
+				onGround = true
+			}
+			world:addPlayer(setmetatable({
 				uuid = id,
 				name = name,
 				gamemode = gamemode,
 				dimension = dimension,
 				entityId = eid,
 				socket = socket,
-				world = world
-			}, {__index = api_require("player")})
-			world.entities[eid] = {
-				x = world.spawnPosition.x,
-				y = world.spawnPosition.y,
-				z = world.spawnPosition.z
-			}
+				world = world,
+				client = client,
+				inventory = {}
+			}, {__index = api_require("player")}))
+
 			client.player = players[id]
 			net.writeInt(ss, eid)
 			net.writeUnsignedByte(ss, gamemode)
@@ -312,8 +397,8 @@ local packetHandlers = {
 
 			pluginEvent.send("player_join", players[id])
 
-			client.state = 3
-		elseif client.state == 3 then
+			client.state = "play"
+		elseif client.state == "play" then
 			local teleportId = net.readVarInt(stream)
 			print("Player successfully teleported with ID " .. teleportId)
 		end
@@ -388,11 +473,24 @@ local packetHandlers = {
 			data = ss.str
 		})
 		net.writePacket(socket, packets.newPlayerPositionAndRotationPacket(world.spawnPosition, 0, 0))
+
+		for k, p in pairs(world.players) do
+			if p ~= client.player then
+				local spawnPacket = packets.newSpawnPlayerPacket(p)
+				net.writePacket(socket, spawnPacket)
+			end
+		end
+	end,
+	[0x0A] = function(stream, socket, client) -- close window
+
 	end,
 	[0x0B] = function(stream, socket, client) -- plugin message
 		local identifier = net.readString(stream)
 		print("Client message to channel " .. identifier)
 		pluginEvent.send("plugin_channel", identifier)
+	end,
+	[0x0F] = function(stream, socket, client) -- keep alive
+		-- TODO use it for ping rate
 	end,
 	[0x11] = function(stream, socket, client) -- player position
 		local x = net.readDouble(stream)
@@ -401,25 +499,24 @@ local packetHandlers = {
 		local world = client.player.world
 		print("Player move to " .. x .. ", " .. y .. ", " .. z)
 		pluginEvent.send("player_move", client.player, x, y, z)
-		pluginEvent.send("entity_move", world.entities[client.player.entityId], x, y, z)
-	end,
-	[0x11] = function(stream, socket, client) -- player rotation
-		-- TODO read
+		world:moveEntity(world.entities[client.player.entityId], x, y, z)
 	end,
 	[0x12] = function(stream, socket, client) -- player position and rotation
 		local x = net.readDouble(stream)
 		local y = net.readDouble(stream)
 		local z = net.readDouble(stream)
 		local world = client.player.world
-		pluginEvent.send("player_move", client.player, x, y, z)
-		pluginEvent.send("entity_move", world.entities[client.player.entityId], x, y, z)
 		print("Player move to " .. x .. ", " .. y .. ", " .. z)
+		pluginEvent.send("player_move", client.player, x, y, z)
+		world:moveEntity(world.entities[client.player.entityId], x, y, z)
 	end,
 	[0x13] = function(stream, socket, client) -- player rotation
 		-- TODO read
 	end,
 	[0x14] = function(stream, socket, client) -- player movement
 		local onGround = net.readBoolean(stream)
+		world.entities[client.player.entityId].onGround = onGround
+	end,
 	[0x19] = function(stream, socket, client) -- player abilities
 		local flags = net.readUnsignedByte(stream)
 	end,
@@ -432,13 +529,56 @@ local packetHandlers = {
 		net.writePacket(socket, packet)
 
 		if status == 2 then -- broke block
-
+			setBlock(location, 0) -- set air
 		end
 	end,
 	[0x1B] = function(stream, socket, client) -- entity action
 
+	end,
+	[0x23] = function(stream, socket, client) -- held item change
+		-- TODO use it
+	end,
+	[0x26] = function(stream, socket, client) -- creative inventory action
+		local slotId = net.readUnsignedShort(stream)
+		local item = net.readSlot(stream)
+		local inv = client.player.inventory
+		inv[slotId] = item
+	end,
+	[0x2A] = function(stream, socket, client) -- animation
+		local hand = net.readVarInt(stream)
+		-- TODO send animation to other players
+	end,
+	[0x2C] = function(stream, socket, client) -- player block placement
+		local hand = net.readVarInt(stream)
+		local location = net.readPosition(stream)
+		local face = net.readVarInt(stream)
+
+		if face == 0 then -- top
+			location[2] = location[2] - 1
+		elseif face == 1 then -- bottom
+			location[2] = location[2] + 1
+		elseif face == 2 then -- north
+			location[3] = location[3] - 1
+		elseif face == 3 then -- south
+			location[3] = location[3] + 1
+		elseif face == 4 then -- west
+			location[1] = location[1] - 1
+		elseif face == 5 then -- east
+			location[1] = location[1] + 1
+		end
+
+		print("set block at " .. location[1] .. ", " .. location[2] .. ", " .. location[3])
+
+		client.player.world:setBlock(location, 10)
+	end,
+	[0x2D] = function(stream, socket, client) -- use item
 	end
 }
+
+require("event").onError = function(...)
+	io.stderr:write(...)
+	io.stderr:write('\n')
+end
 
 print("Starting plugins..")
 
@@ -452,23 +592,37 @@ serverSocket:bind("MCServerOnOC")
 serverSocket:listen()
 
 print("Listening..")
+thread.create(function()
+	while true do
+		local packet = packets.newKeepAlivePacket()
+		for k, p in pairs(world.players) do
+			if p.client.state == "play" and not p.socket.closed then
+				net.writePacket(p.socket, packet)
+			end
+		end
+		os.sleep(1)
+	end
+end)
 while true do
 	local socket = serverSocket:accept()
-	local client = {
-		state = 0
-	}
-	while true do
-		serverSocket:pollState()
-		if socket:isClosed() then
-			break
+	thread.create(function()
+		local client = {
+			state = "handshake"
+		}
+		while true do
+			serverSocket:pollState()
+			if socket:isClosed() then
+				if client.player then
+					client.player:disconnect()
+				end
+				break
+			end
+			local packet = net.readPacket(socket)
+			print("Packet ID: " .. string.format("0x%x", packet.id))
+			if not packetHandlers[packet.id] then
+				error("missing packet handler for id " .. string.format("0x%x", packet.id))
+			end
+			packetHandlers[packet.id](packet.dataStream, socket, client)
 		end
-		local packet = net.readPacket(socket)
-		print("Packet ID: " .. string.format("0x%x", packet.id))
-		if not packetHandlers[packet.id] then
-			error("missing packet handler for id " .. string.format("0x%x", packet.id))
-		end
-		packetHandlers[packet.id](packet.dataStream, socket, client)
-		local id = require("event").pull(0)
-		print("event: " .. tostring(id))
-	end
+	end)
 end

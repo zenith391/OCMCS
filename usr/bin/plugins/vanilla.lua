@@ -31,4 +31,4 @@ event.on("player_chat", function(_, player, message)
 	})
 end)
 
-print("[Vanilla Minecraft] Ready!")
+print("[Vanilla Plugin] Ready!")

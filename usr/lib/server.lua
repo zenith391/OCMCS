@@ -1,6 +1,8 @@
 local server = {}
 local internet = require("internet")
 local event = require("event")
+package.loaded["mt-buffer"] = nil
+local mtBuffer = require("mt-buffer")
 
 local bridgeIp = "localhost"
 local commPort = 3330
@@ -26,7 +28,7 @@ function server.open()
 		end
 		socketToken = socketToken:sub(2)
 
-		local sock, err = internet.open(bridgeIp, commPort)
+		local sock, err = mtBuffer.from(internet.socket(bridgeIp, commPort))
 		if not sock then
 			error(err)
 		end
@@ -38,14 +40,14 @@ function server.open()
 		sock.isClosed = function(self)
 			for _, tok in pairs(closedTokens) do
 				if tok == self.token then
-					if not sock.closed then
-						sock:close()
-						sock.closed = true
+					if not self.closed then
+						self:close()
+						self.closed = true
 					end
 					return true
 				end
 			end
-			return false
+			return self.closed
 		end
 		local resp = sock:read(1)
 		if resp == "n" then
@@ -78,7 +80,7 @@ function server.open()
 		self.sock:close()
 	end
 
-	local sock, err = internet.open(bridgeIp, commPort)
+	local sock, err = mtBuffer.from(internet.socket(bridgeIp, commPort))
 	if not sock then
 		error(err)
 	end
