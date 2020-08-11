@@ -8,7 +8,7 @@ function buffer.from(handle, err)
 	local stream = {}
 	stream.stream = handle
 	stream.buf = ""
-	stream.size = 1024
+	stream.size = 64*1024 -- 64 KiB
 	stream.closed = false
 
 	if handle.socket and handle.socket.finishConnect then
@@ -27,6 +27,10 @@ function buffer.from(handle, err)
 	function stream:fillBuffer()
 		if self.buf and #self.buf == 0 then
 			self.buf = self.stream:read(self.size)
+			if self.buf and #self.buf > 512 then
+				print("Warning! High buffer queue: " .. #self.buf)
+			end
+			os.sleep(0)
 		end
 	end
 
@@ -39,10 +43,7 @@ function buffer.from(handle, err)
 				if str:len() > 0 then
 					return str
 				else
-					if not self.closed then
-						print("CLOSE!")
-						self:close()
-					end
+					self:close()
 					return nil
 				end
 			end
@@ -50,14 +51,14 @@ function buffer.from(handle, err)
 			if len == math.huge then
 				partLen = self.size-1
 			end
-			local part = self.buf:sub(1, partLen)
+			str = str .. self.buf:sub(1, partLen)
 			self.buf = self.buf:sub(partLen+1) -- cut the read part
-			str = str .. part
-			if self.buf == "" then
-				os.sleep(0)
-			end
 		end
 		return str
+	end
+
+	function stream:bufferEmpty()
+		return not self.buf or #self.buf == 0
 	end
 
 	function stream:read(f)

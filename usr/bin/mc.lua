@@ -16,6 +16,7 @@ end
 local pluginEvent = api_require("event")
 local packets = api_require("packets")
 local net = api_require("network")
+local commands = api_require("commands")
 local nextEid = 0
 
 local function generateEId()
@@ -39,153 +40,139 @@ local function writeChunkLight(stream, cx, cz, world)
 	})
 end
 
-local function writeChunkData(stream, cx, cz, world)
-	local ss = net.stringStream()
-	net.writeInt(ss, cx)
-	net.writeInt(ss, cz)
-	local bitMask = 0x1
-	net.writeBoolean(ss, true) -- full chunk
-	net.writeVarInt(ss, bitMask)
+--[[
+    Implemented as described here:
+    http://flafla2.github.io/2014/08/09/perlinnoise.html
+]]--
 
-	-- TODO write heightmap
-	local heightmap = net.stringStream()
-	net.writeUnsignedByte(heightmap, 10) -- TAG_Compound
-	net.writeNBTString(heightmap, "") -- name of root compound
-	net.writeUnsignedByte(heightmap, 12) -- TAG_Long_Array
-	net.writeNBTString(heightmap, "MOTION_BLOCKING")
-	net.writeInt(heightmap, 36) -- 256 9-bit entries -> 36 longs
-	local heights = {}
-	for x=1, 16 do
-		for z=1, 16 do
-			table.insert(heights, world.generator.height(x, z))
-		end
-	end
-	local bits = {}
-	for i=1, 16*16 do
-		local v = heights[i]
-		table.insert(bits, (v & 0x100) >> 8)
-		table.insert(bits, (v & 0x80) >> 7)
-		table.insert(bits, (v & 0x40) >> 6)
-		table.insert(bits, (v & 0x20) >> 5)
-		table.insert(bits, (v & 0x10) >> 4)
-		table.insert(bits, (v & 0x08) >> 3)
-		table.insert(bits, (v & 0x04) >> 2)
-		table.insert(bits, (v & 0x02) >> 1)
-		table.insert(bits, v & 0x01)
-	end
-	local long = 0
-	local longBits = 0
-	for i=1, #bits do
-		local bit = bits[i]
-		long = long << 1
-		long = long | bit
-		longBits = longBits + 1
-		if longBits == 64 then
-			net.writeUnsignedLong(heightmap, long)
-			long = 0
-			longBits = 0
-		end
-	end
-	net.writeUnsignedByte(heightmap, 12) -- TAG_Long_Array
-	net.writeNBTString(heightmap, "WORLD_SURFACE")
-	net.writeInt(heightmap, 0)
-	net.writeUnsignedByte(heightmap, 0) -- TAG_End (for the compound)
-	ss:write(heightmap.str)
+local perlin = {}
+perlin.p = {}
 
-	local biomeData = {}
-	for i=1, 1024 do
-		biomeData[i] = 127 -- Void
-	end
+-- Hash lookup table as defined by Ken Perlin
+-- This is a randomly arranged array of all numbers from 0-255 inclusive
+local permutation = {151,160,137,91,90,15,
+  131,13,201,95,96,53,194,233,7,225,140,36,103,30,69,142,8,99,37,240,21,10,23,
+  190, 6,148,247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,57,177,33,
+  88,237,149,56,87,174,20,125,136,171,168, 68,175,74,165,71,134,139,48,27,166,
+  77,146,158,231,83,111,229,122,60,211,133,230,220,105,92,41,55,46,245,40,244,
+  102,143,54, 65,25,63,161, 1,216,80,73,209,76,132,187,208, 89,18,169,200,196,
+  135,130,116,188,159,86,164,100,109,198,173,186, 3,64,52,217,226,250,124,123,
+  5,202,38,147,118,126,255,82,85,212,207,206,59,227,47,16,58,17,182,189,28,42,
+  223,183,170,213,119,248,152, 2,44,154,163, 70,221,153,101,155,167, 43,172,9,
+  129,22,39,253, 19,98,108,110,79,113,224,232,178,185, 112,104,218,246,97,228,
+  251,34,242,193,238,210,144,12,191,179,162,241, 81,51,145,235,249,14,239,107,
+  49,192,214, 31,181,199,106,157,184, 84,204,176,115,121,50,45,127, 4,150,254,
+  138,236,205,93,222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180
+}
 
-	for k, v in pairs(biomeData) do
-		net.writeInt(ss, v)
-	end
-
-	local sectStream = net.stringStream()
-
-	-- palette
-	local blockStates = {}
-	local nonAirBlocks = 0
-	local longs = {}
-	local paletteBits = 4
-	local usePalette = paletteBits ~= 14
-	for i=1, 4096/(64/paletteBits) do longs[i] = 0 end
-	local palette = {
-		[0] = 0,
-		[8] = 1,
-		[10] = 2,
-		[33] = 3,
-		[9] = 4
-	}
-
-	for y=0, 15 do
-		for z=0, 15 do
-			for x=0, 15 do
-				local block = world.generator.block(cx*16+x, y, cz*16+z)
-				for k, v in pairs(world.changedBlocks) do
-					if v.x == cx*16+x and v.y == y and v.z == cz*16+z then
-						block = v.newId
-					end
-				end
-
-				local index = (((y*16)+z)*16)+x
-				local value = (usePalette and palette[block]) or block
-				
-				local startLong = (index*paletteBits) // 64
-				local startOffset = (index*paletteBits) % 64
-				local endLong = ((index+1)*paletteBits-1) // 64
-				longs[startLong+1] = longs[startLong+1] | (value << startOffset)
-				if startLong ~= endLong then
-					longs[endLong+1] = value >> (64 - startOffset)
-				end
-
-				if block ~= 0 then
-					nonAirBlocks = nonAirBlocks + 1
-				end
-			end
-		end
-	end
-
-	net.writeShort(sectStream, nonAirBlocks)
-	net.writeUnsignedByte(sectStream, paletteBits)
-
-	if usePalette then
-		local keyPalette = {}
-		local len = 0
-		for k, v in pairs(palette) do
-			keyPalette[v+1] = k
-			len = len + 1
-		end
-		net.writeVarInt(sectStream, len)
-		for k, v in ipairs(keyPalette) do
-			net.writeVarInt(sectStream, v)
-		end
-	end
-	net.writeVarInt(sectStream, #longs)
-	for i=1, #longs do
-		net.writeUnsignedLong(sectStream, longs[i])
-	end
-
-	net.writeVarInt(ss, #sectStream.str)
-	ss:write(sectStream.str)
-	net.writeVarInt(ss, 0) -- 0 block entities
-
-	net.writePacket(stream, {
-		id = 0x22,
-		data = ss.str
-	})
+-- p is used to hash unit cube coordinates to [0, 255]
+for i=0,255 do
+    -- Convert to 0 based index table
+    perlin.p[i] = permutation[i+1]
+    -- Repeat the array to avoid buffer overflow in hash function
+    perlin.p[i+256] = permutation[i+1]
 end
 
-local function sendFullChunk(stream, cx, cz, world)
-	writeChunkData(stream, cx, cz, world)
-	--writeChunkLight(stream, cx, cz, world)
+-- Return range: [-1, 1]
+function perlin:noise(x, y, z)
+    y = y or 0
+    z = z or 0
+
+    -- Calculate the "unit cube" that the point asked will be located in
+    local xi = math.floor(x)&255
+    local yi = math.floor(y)&255
+    local zi = math.floor(z)&255
+
+    -- Next we calculate the location (from 0 to 1) in that cube
+    x = x - math.floor(x)
+    y = y - math.floor(y)
+    z = z - math.floor(z)
+
+    -- We also fade the location to smooth the result
+    local u = self.fade(x)
+    local v = self.fade(y)
+    local w = self.fade(z)
+
+    -- Hash all 8 unit cube coordinates surrounding input coordinate
+    local p = self.p
+    local A, AA, AB, AAA, ABA, AAB, ABB, B, BA, BB, BAA, BBA, BAB, BBB
+    A   = p[xi  ] + yi
+    AA  = p[A   ] + zi
+    AB  = p[A+1 ] + zi
+    AAA = p[ AA ]
+    ABA = p[ AB ]
+    AAB = p[ AA+1 ]
+    ABB = p[ AB+1 ]
+
+    B   = p[xi+1] + yi
+    BA  = p[B   ] + zi
+    BB  = p[B+1 ] + zi
+    BAA = p[ BA ]
+    BBA = p[ BB ]
+    BAB = p[ BA+1 ]
+    BBB = p[ BB+1 ]
+
+    -- Take the weighted average between all 8 unit cube coordinates
+    return self.lerp(w,
+        self.lerp(v,
+            self.lerp(u,
+                self:grad(AAA,x,y,z),
+                self:grad(BAA,x-1,y,z)
+            ),
+            self.lerp(u,
+                self:grad(ABA,x,y-1,z),
+                self:grad(BBA,x-1,y-1,z)
+            )
+        ),
+        self.lerp(v,
+            self.lerp(u,
+                self:grad(AAB,x,y,z-1), self:grad(BAB,x-1,y,z-1)
+            ),
+            self.lerp(u,
+                self:grad(ABB,x,y-1,z-1), self:grad(BBB,x-1,y-1,z-1)
+            )
+        )
+    )
+end
+
+-- Gradient function finds dot product between pseudorandom gradient vector
+-- and the vector from input coordinate to a unit cube vertex
+perlin.dot_product = {
+    [0x0]=function(x,y,z) return  x + y end,
+    [0x1]=function(x,y,z) return -x + y end,
+    [0x2]=function(x,y,z) return  x - y end,
+    [0x3]=function(x,y,z) return -x - y end,
+    [0x4]=function(x,y,z) return  x + z end,
+    [0x5]=function(x,y,z) return -x + z end,
+    [0x6]=function(x,y,z) return  x - z end,
+    [0x7]=function(x,y,z) return -x - z end,
+    [0x8]=function(x,y,z) return  y + z end,
+    [0x9]=function(x,y,z) return -y + z end,
+    [0xA]=function(x,y,z) return  y - z end,
+    [0xB]=function(x,y,z) return -y - z end,
+    [0xC]=function(x,y,z) return  y + x end,
+    [0xD]=function(x,y,z) return -y + z end,
+    [0xE]=function(x,y,z) return  y - x end,
+    [0xF]=function(x,y,z) return -y - z end
+}
+function perlin:grad(hash, x, y, z)
+    return self.dot_product[hash&0xF](x,y,z)
+end
+
+-- Fade function is used to smooth final output
+function perlin.fade(t)
+    return t * t * t * (t * (t * 6 - 15) + 10)
+end
+
+function perlin.lerp(t, a, b)
+    return a + t * (b - a)
 end
 
 local configuration = {
 	maxPlayers = 50,
 	world = {
-		type = "flat",
-		viewDistance = 8
+		type = "custom",
+		viewDistance = 4
 	}
 }
 
@@ -212,17 +199,32 @@ local world = {
 	spawnPosition = {0, 5, 0},
 	generator = {
 		height = function(x, z)
-			return 3
+			local noise = (perlin:noise(x/16, z/16) + 1) / 2
+			return math.floor(noise*16)
 		end,
 		block = function(x, y, z)
-			if y == 3 then
-				return ((x % 3 == 0) and 8) or 9 -- grass block
-			elseif y == 2 or y == 1 then
-				return 10 -- dirt
-			elseif y == 0 then
-				return 33 -- bedrock
+			if configuration.world.type == "flat" then
+				if y == 3 then
+					return 9
+				elseif y == 2 or y == 1 then
+					return 10 -- dirt
+				elseif y == 0 then
+					return 33 -- bedrock
+				else
+					return 0 -- air
+				end
 			else
-				return 0 -- air
+				local noise = (perlin:noise(x/16, z/16) + 1) / 2
+				local height = math.floor(noise*16)
+				if y == height then
+					return 9 -- grass block
+				elseif y == 0 then
+					return 33 -- bedrock
+				elseif y < height then
+					return 10 -- dirt
+				else
+					return 0 -- air
+				end
 			end
 		end
 	},
@@ -230,6 +232,8 @@ local world = {
 	players = players,
 	entities = {}
 }
+
+world.spawnPosition = {0, world.generator.height(0, 0)+2, 0}
 
 function world:broadcast(component)
 	local chatPacket = packets.newChatMessagePacket(component, "chat")
@@ -243,6 +247,31 @@ function world:moveEntity(entity, x, y, z)
 	entity.y = y
 	entity.z = z
 	pluginEvent.send("entity_move", entity, x, y, z)
+	if not entity.lastX then
+		entity.lastX = 0
+		entity.lastY = 0
+		entity.lastZ = 0
+	end
+	local dx,dy,dz = entity.x-entity.lastX, entity.y-entity.lastY, entity.z-entity.lastZ
+	local dist = math.sqrt(dx*dx + dy*dy + dz*dz)
+	if dist > 0.5 then
+		entity.lastX = entity.x
+		entity.lastY = entity.y
+		entity.lastZ = entity.z
+		local movePacket = packets.newEntityTeleportPacket(entity)
+		for k, player in pairs(self.players) do
+			if player.entityId ~= entity.id then
+				net.writePacket(player.socket, movePacket)
+			end
+		end
+	end
+end
+
+function world:rotateEntity(entity, yaw, pitch)
+	entity.yaw = yaw
+	entity.pitch = pitch
+	pluginEvent.send("entity_rotate", entity, yaw, pitch)
+
 	local movePacket = packets.newEntityTeleportPacket(entity)
 	for k, player in pairs(self.players) do
 		if player.entityId ~= entity.id then
@@ -277,17 +306,18 @@ function world:addPlayer(player)
 end
 
 function world:setBlock(location, id)
-	for k, v in pairs(self.changedBlocks) do
-		if v.x == location[1] and v.y == location[2] and v.z == location[3] then
-			self.changedBlocks[k].newId = id
-		end
+	local x,y,z = location[1], location[2], location[3]
+	local name = x..","..y..","..z
+	if self.changedBlocks[name] then
+		self.changedBlocks[name].newId = id
+	else
+		self.changedBlocks[name] = {
+			x = location[1],
+			y = location[2],
+			z = location[3],
+			newId = id
+		}
 	end
-	table.insert(self.changedBlocks, {
-		x = location[1],
-		y = location[2],
-		z = location[3],
-		newId = id
-	})
 
 	local changePacket = packets.newBlockChangePacket(location, id)
 	for k, player in pairs(self.players) do
@@ -356,6 +386,8 @@ local packetHandlers = {
 				y = world.spawnPosition[2],
 				z = world.spawnPosition[3],
 				id = eid,
+				yaw = 0,
+				pitch = 0,
 				onGround = true
 			}
 			world:addPlayer(setmetatable({
@@ -367,10 +399,18 @@ local packetHandlers = {
 				socket = socket,
 				world = world,
 				client = client,
-				inventory = {}
+				inventory = {},
+				loadedChunks = {},
+				selectedSlot = 0
 			}, {__index = api_require("player")}))
 
-			client.player = players[id]
+			client.player = world.players[id]
+			for i=1, 45 do
+				client.player.inventory[i] = {
+					present = false
+				}
+			end
+
 			net.writeInt(ss, eid)
 			net.writeUnsignedByte(ss, gamemode)
 			net.writeInt(ss, dimension)
@@ -395,12 +435,11 @@ local packetHandlers = {
 				fovModifier = 0.1
 			}))
 
-			pluginEvent.send("player_join", players[id])
+			pluginEvent.send("player_join", world.players[id])
 
 			client.state = "play"
 		elseif client.state == "play" then
 			local teleportId = net.readVarInt(stream)
-			print("Player successfully teleported with ID " .. teleportId)
 		end
 	end,
 	[0x01] = function(stream, socket, client) -- ping
@@ -413,6 +452,9 @@ local packetHandlers = {
 	[0x03] = function(stream, socket, client) -- chat message
 		local msg = net.readString(stream)
 		local name = client.player.name
+		if msg:sub(1,1) == "/" then
+			commands.execute(msg:sub(2), client.player)
+		end
 		pluginEvent.send("player_chat", client.player, msg)
 	end,
 	[0x05] = function(stream, socket, client) -- client settings
@@ -443,7 +485,7 @@ local packetHandlers = {
 			net.writeString(ss, player.name)
 			net.writeVarInt(ss, 0) -- 0 properties
 			net.writeVarInt(ss, player.gamemode)
-			net.writeVarInt(ss, -1) -- unknown ping
+			net.writeVarInt(ss, 200) -- unknown ping
 			net.writeBoolean(ss, false) -- no display name
 		end
 
@@ -460,11 +502,7 @@ local packetHandlers = {
 			data = ss.str
 		})
 
-		for x=-2, 2 do
-			for y=-2,2 do
-				sendFullChunk(socket, x, y, world)
-			end
-		end
+		client.player:ensureChunksLoaded()
 
 		ss = net.stringStream()
 		net.writePosition(ss, world.spawnPosition)
@@ -497,21 +535,34 @@ local packetHandlers = {
 		local y = net.readDouble(stream)
 		local z = net.readDouble(stream)
 		local world = client.player.world
-		print("Player move to " .. x .. ", " .. y .. ", " .. z)
+		local entity = world.entities[client.player.entityId]
+		entity.onGround = net.readBoolean(stream)
 		pluginEvent.send("player_move", client.player, x, y, z)
-		world:moveEntity(world.entities[client.player.entityId], x, y, z)
+		world:moveEntity(entity, x, y, z)
+		client.player:updateViewPosition()
+		client.player:ensureChunksLoaded()
 	end,
 	[0x12] = function(stream, socket, client) -- player position and rotation
 		local x = net.readDouble(stream)
 		local y = net.readDouble(stream)
 		local z = net.readDouble(stream)
 		local world = client.player.world
-		print("Player move to " .. x .. ", " .. y .. ", " .. z)
+		local entity = world.entities[client.player.entityId]
+		local yaw = net.readFloat(stream)
+		local pitch = net.readFloat(stream)
+		entity.onGround = net.readBoolean(stream)
 		pluginEvent.send("player_move", client.player, x, y, z)
-		world:moveEntity(world.entities[client.player.entityId], x, y, z)
+		world:moveEntity(entity, x, y, z)
+		world:rotateEntity(entity, yaw, pitch)
+		client.player:updateViewPosition()
+		client.player:ensureChunksLoaded()
 	end,
 	[0x13] = function(stream, socket, client) -- player rotation
-		-- TODO read
+		local entity = client.player.world.entities[client.player.entityId]
+		local yaw = net.readFloat(stream)
+		local pitch = net.readFloat(stream)
+		entity.onGround = net.readBoolean(stream)
+		world:rotateEntity(entity, yaw, pitch)
 	end,
 	[0x14] = function(stream, socket, client) -- player movement
 		local onGround = net.readBoolean(stream)
@@ -524,19 +575,21 @@ local packetHandlers = {
 		local status = net.readVarInt(stream)
 		local location = net.readPosition(stream)
 		local face = net.readUnsignedByte(stream)
+		local player = client.player
 
 		local packet = packets.newAcknowledgePlayerDiggingPacket(location, 0, status, true)
 		net.writePacket(socket, packet)
 
-		if status == 2 then -- broke block
-			setBlock(location, 0) -- set air
+		if status == 2 or (status == 0 and player.gamemode == 1) then -- broke block
+			client.player.world:setBlock(location, 0) -- set air
 		end
 	end,
 	[0x1B] = function(stream, socket, client) -- entity action
 
 	end,
 	[0x23] = function(stream, socket, client) -- held item change
-		-- TODO use it
+		local selectedSlot = net.readUnsignedShort(stream)
+		client.player.selectedSlot = selectedSlot
 	end,
 	[0x26] = function(stream, socket, client) -- creative inventory action
 		local slotId = net.readUnsignedShort(stream)
@@ -552,24 +605,32 @@ local packetHandlers = {
 		local hand = net.readVarInt(stream)
 		local location = net.readPosition(stream)
 		local face = net.readVarInt(stream)
+		local item = client.player.inventory[client.player.selectedSlot+36]
 
-		if face == 0 then -- top
-			location[2] = location[2] - 1
-		elseif face == 1 then -- bottom
-			location[2] = location[2] + 1
-		elseif face == 2 then -- north
-			location[3] = location[3] - 1
-		elseif face == 3 then -- south
-			location[3] = location[3] + 1
-		elseif face == 4 then -- west
-			location[1] = location[1] - 1
-		elseif face == 5 then -- east
-			location[1] = location[1] + 1
+		if item.present then
+			if face == 0 then -- top
+				location[2] = location[2] - 1
+			elseif face == 1 then -- bottom
+				location[2] = location[2] + 1
+			elseif face == 2 then -- north
+				location[3] = location[3] - 1
+			elseif face == 3 then -- south
+				location[3] = location[3] + 1
+			elseif face == 4 then -- west
+				location[1] = location[1] - 1
+			elseif face == 5 then -- east
+				location[1] = location[1] + 1
+			end
+			local blockId = item.id
+			if item.id >= 8 then
+				blockId = blockId + 1
+			end
+			if item.id >= 11 then
+				blockId = blockId + 1
+			end
+			print("set block " .. blockId .. " (item id = " .. item.id .. ")")
+			client.player.world:setBlock(location, blockId)
 		end
-
-		print("set block at " .. location[1] .. ", " .. location[2] .. ", " .. location[3])
-
-		client.player.world:setBlock(location, 10)
 	end,
 	[0x2D] = function(stream, socket, client) -- use item
 	end
@@ -600,7 +661,7 @@ thread.create(function()
 				net.writePacket(p.socket, packet)
 			end
 		end
-		os.sleep(1)
+		os.sleep(3)
 	end
 end)
 while true do
@@ -610,19 +671,30 @@ while true do
 			state = "handshake"
 		}
 		while true do
-			serverSocket:pollState()
+			if socket:bufferEmpty() then
+				serverSocket:pollState()
+			end
 			if socket:isClosed() then
 				if client.player then
 					client.player:disconnect()
 				end
 				break
 			end
-			local packet = net.readPacket(socket)
-			print("Packet ID: " .. string.format("0x%x", packet.id))
-			if not packetHandlers[packet.id] then
-				error("missing packet handler for id " .. string.format("0x%x", packet.id))
+			local ok, err = pcall(function()
+				local packet = net.readPacket(socket)
+				--print("Packet ID: " .. string.format("0x%x", packet.id))
+				if not packetHandlers[packet.id] then
+					error("missing packet handler for id " .. string.format("0x%x", packet.id))
+				end
+				packetHandlers[packet.id](packet.dataStream, socket, client)
+			end)
+			if not ok then
+				if client.player then
+					pcall(client.player:kick("Internal Server Error: " .. err))
+				end
+				socket:close()
+				error(err)
 			end
-			packetHandlers[packet.id](packet.dataStream, socket, client)
 		end
 	end)
 end

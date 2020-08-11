@@ -35,6 +35,10 @@ function net.readBoolean(stream)
 	return string.byte(stream:read(1)) ~= 0
 end
 
+function net.readFloat(stream)
+	return string.unpack(">f", stream:read(4))
+end
+
 function net.readDouble(stream)
 	return string.unpack(">d", stream:read(8))
 end
@@ -85,7 +89,12 @@ function net.writeNBTString(stream, str)
 end
 
 function net.writeAngle(stream, angle)
-	stream:write(string.char(angle))
+	while angle < -180 do
+		angle = angle + 360
+	end
+	angle = angle % 360
+	local byte = math.floor((angle / 360) * 255)
+	stream:write(string.char(byte))
 end
 
 function net.writeUUID(stream, uuid)
@@ -180,7 +189,7 @@ function net.readPosition(stream)
 	if x >= 2^25 then x=x-2^26 end
 	if y >= 2^11 then y=y-2^12 end
 	if z >= 2^25 then z=z-2^26 end
-	return {x, y, z}
+	return {math.floor(x), math.floor(y), math.floor(z)}
 end
 
 function net.readString(stream)

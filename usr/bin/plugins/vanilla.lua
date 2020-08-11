@@ -20,7 +20,7 @@ event.on("player_chat", function(_, player, message)
 				},
 				hoverEvent = {
 					action = "show_entity",
-					value = "{id:"..player.uuid..",name:"..player.name.."}"
+					value = "{id:\""..player.uuid.."\",name:\""..player.name.."\"}"
 				},
 				insertion = player.name
 			},

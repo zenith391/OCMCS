@@ -17,6 +17,9 @@ function server.open()
 		self.sock:write("l")
 		local response = self.sock:read(1)
 		if response ~= "l" then
+			if response == nil then
+				error("bridge server not opened")
+			end
 			error("invalid listen response, got " .. tostring(response))
 		end
 	end
