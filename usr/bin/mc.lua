@@ -690,7 +690,7 @@ while true do
 			end)
 			if not ok then
 				if client.player then
-					pcall(client.player:kick("Internal Server Error: " .. err))
+					pcall(client.player.kick, ("Internal Server Error: " .. err))
 				end
 				socket:close()
 				error(err)
