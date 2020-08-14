@@ -8,6 +8,8 @@ function buffer.from(handle, err)
 	local stream = {}
 	stream.stream = handle
 	stream.buf = ""
+	stream.wbuf = "" -- unbounded write buffer
+	stream.useWBuf = false -- use write buffer
 	stream.size = 64*1024 -- 64 KiB
 	stream.closed = false
 
@@ -19,13 +21,25 @@ function buffer.from(handle, err)
 		self.stream:close()
 		self.closed = true
 	end
+
+	function stream:flush()
+		self.stream:write(self.wbuf)
+		self.wbuf = ""
+	end
 	
 	function stream:write(s)
-		self.stream:write(s)
+		if self.useWBuf then
+			self.wbuf = self.wbuf .. s
+		else
+			self.stream:write(s)
+		end
 	end
 
 	function stream:fillBuffer()
 		if self.buf and #self.buf == 0 then
+			if self.onBufferRefill then
+				self:onBufferRefill()
+			end
 			self.buf = self.stream:read(self.size)
 			if self.buf and #self.buf > 512 then
 				print("Warning! High buffer queue: " .. #self.buf)
@@ -69,7 +83,14 @@ function buffer.from(handle, err)
 		return nil, "invalid mode"
 	end
 
-	function stream:setvbuf(mode, size) end
+	function stream:setvbuf(mode, size)
+		self:flush()
+		if mode == "no" then
+			self.useWBuf = false
+		elseif mode == "full" then
+			self.useWBuf = true
+		end
+	end
 
 	return stream
 end

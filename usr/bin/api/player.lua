@@ -25,10 +25,11 @@ function player:send(chat)
 		}
 	end
 
-	net.writePacket(self.socket, packets.newChatMessagePacket(component))
+	net.writePacket(self.socket, packets.newChatMessagePacket(chat))
 end
 
 function player:disconnect()
+	self.world.players[self.uuid] = nil
 	local ss = net.stringStream()
 	net.writeVarInt(ss, 4) -- remove player
 	net.writeVarInt(ss, 1)
@@ -39,7 +40,6 @@ function player:disconnect()
 		data = ss.str
 	}
 
-	self.world.players[self.uuid] = nil
 	for k, p in pairs(self.world.players) do
 		if p ~= self then
 			net.writePacket(p.socket, removePacket)
@@ -82,7 +82,6 @@ function player:ensureChunksLoaded()
 					goto continue
 				end
 			end
-			--print(tcx .. ", " .. tcz .. " not loaded")
 			local data = packets.newChunkDataPacket(tcx, tcz, self.world)
 			net.writePacket(self.socket, data)
 			table.insert(self.loadedChunks, {x = tcx, z = tcz})

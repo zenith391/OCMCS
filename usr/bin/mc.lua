@@ -454,6 +454,7 @@ local packetHandlers = {
 		local name = client.player.name
 		if msg:sub(1,1) == "/" then
 			commands.execute(msg:sub(2), client.player)
+			return
 		end
 		pluginEvent.send("player_chat", client.player, msg)
 	end,
@@ -666,12 +667,14 @@ thread.create(function()
 end)
 while true do
 	local socket = serverSocket:accept()
+	socket:setvbuf("full")
 	thread.create(function()
 		local client = {
 			state = "handshake"
 		}
 		while true do
 			if socket:bufferEmpty() then
+				socket:flush() -- flush all writes when all packets are processed
 				serverSocket:pollState()
 			end
 			if socket:isClosed() then
@@ -690,7 +693,11 @@ while true do
 			end)
 			if not ok then
 				if client.player then
-					pcall(client.player.kick, ("Internal Server Error: " .. err))
+					local ok, err = pcall(client.player.kick, client.player, "Internal Server Error: " .. err)
+					if not ok then
+						socket:close()
+						error("error while kicking player: " .. err)
+					end
 				end
 				socket:close()
 				error(err)
