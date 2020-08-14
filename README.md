@@ -11,3 +11,6 @@ Now run the bridge software (it's Java code, so you'll need a JVM, i plan to cre
 Now you can just copy the `usr` directory to your OpenComputers computer, type `mc` and then press Enter. Voilà! You got a Minecraft server ready at port 25565 on your localhost.
 
 (Note: if you want it to be public, you'll still need to port forward your router.)
+
+
+*Note: [wiki.vg](https://wiki.vg) was used to make this.*

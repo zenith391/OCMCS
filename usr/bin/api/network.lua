@@ -1,5 +1,9 @@
+-- Library used to write different values to a stream (longs, varints, packets, etc.)
 local net = {}
 
+--[[
+	Creates a read-only stream from a string.
+]]
 function net.stringToStream(str)
 	local pos = 1
 	local stream = {
@@ -12,6 +16,9 @@ function net.stringToStream(str)
 	return stream
 end
 
+--[[
+	Creates a write-only stream that appends writes to its stream.str property
+]]
 function net.stringStream()
 	local stream = {
 		write = function(self, value)

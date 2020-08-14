@@ -7,7 +7,7 @@ function buffer.from(handle, err)
 	end
 	local stream = {}
 	stream.stream = handle
-	stream.buf = ""
+	stream.buf = "" -- read buffer
 	stream.wbuf = "" -- unbounded write buffer
 	stream.useWBuf = false -- use write buffer
 	stream.size = 64*1024 -- 64 KiB
